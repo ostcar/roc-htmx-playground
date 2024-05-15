@@ -1,10 +1,8 @@
-interface Model
-    exposes [
-        Session,
-        Todo,
-        User,
-    ]
-    imports []
+module [
+    Session,
+    Todo,
+    User,
+]
 
 Session : {
     id : I64,

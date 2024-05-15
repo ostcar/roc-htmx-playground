@@ -1,15 +1,13 @@
-interface Sql.User
-    exposes [
-        find,
-        login,
-        register,
-        list,
-    ]
-    imports [
-        pf.Task.{ Task },
-        pf.SQLite3,
-        Model.{ User },
-    ]
+module [
+    find,
+    login,
+    register,
+    list,
+]
+
+import pf.Task exposing [Task]
+import pf.SQLite3
+import Model exposing [User]
 
 find : Str, Str -> Task User _
 find = \path, name ->
@@ -90,7 +88,7 @@ register = \{ path, name, email } ->
             |> Task.onErr \err -> SqlError err |> Task.err
             |> Task.map \_ -> {}
 
-        Ok user -> UserAlreadyExists |> Task.err
+        Ok _ -> UserAlreadyExists |> Task.err
         Err err -> Task.err err
 
 list : Str -> Task (List User) _

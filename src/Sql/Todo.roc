@@ -1,15 +1,13 @@
-interface Sql.Todo
-    exposes [
-        list,
-        create,
-        delete,
-        update,
-    ]
-    imports [
-        pf.Task.{ Task },
-        pf.SQLite3,
-        Model.{ Todo },
-    ]
+module [
+    list,
+    create,
+    delete,
+    update,
+]
+
+import pf.Task exposing [Task]
+import pf.SQLite3
+import Model exposing [Todo]
 
 list : Str, Str -> Task (List Todo) [SqlError _]_
 list = \path, filterQuery ->
