@@ -1,19 +1,19 @@
-app [main, Model] {
-    webserver: platform "https://github.com/ostcar/kingfisher/releases/download/v0.0.3/e8Mu5IplmOnXPU9VgpTCT6kyB463gX-SDC2nnMfAq7M.tar.br",
+app [init_model, update_model, handle_request!, Model] {
+    webserver: platform "../../kingfisher/platform/main.roc",
     html: "https://github.com/Hasnep/roc-html/releases/download/v0.6.0/IOyNfA4U_bCVBihrs95US9Tf5PGAWh3qvrBN4DRbK5c.tar.br",
-    # json: "https://github.com/lukewilliamboswell/roc-json/releases/download/0.10.0/KbIfTNbxShRX1A1FgXei1SpO5Jn8sgP6HP6PXbi-xyA.tar.br",
+    json: "https://github.com/lukewilliamboswell/roc-json/releases/download/0.11.0/z45Wzc-J39TLNweQUoLw3IGZtkQiEN3lTBv3BXErRjQ.tar.br",
 }
 
-import webserver.Webserver exposing [Request, Response]
+import webserver.Http exposing [Request, Response]
 import html.Html
 import Models.Session exposing [Session, User]
 import Models.Todo exposing [Todo]
-# import json.Json
+import json.Json
 import "site.css" as stylesFile : List U8
 import "site.js" as siteFile : List U8
-import "../vendor/bootsrap.bundle-5-3-2.min.js" as bootstrapJSFile : List U8
+import "../vendor/bootstrap.bundle-5-3-2.min.js" as bootstrapJSFile : List U8
 import "../vendor/bootstrap-5-3-2.min.css" as bootsrapCSSFile : List U8
-import "../vendor/htmx-1-9-9.min.js" as htmxJSFile : List U8
+import "../vendor/htmx-2-0-3.min.js" as htmxJSFile : List U8
 import Views.Home
 import Views.Login
 import Views.Register
@@ -27,39 +27,39 @@ Model : {
     todos : List Todo,
 }
 
-main = {
-    decodeModel,
-    encodeModel,
-    handleReadRequest,
-    handleWriteRequest,
+init_model = {
+    sessions: [],
+    users: [],
+    todos: [],
 }
 
-decodeModel : [Init, Existing (List U8)] -> Result Model Str
-decodeModel = \_fromPlatform ->
-    Ok {
-        sessions: [],
-        users: [],
-        todos: [],
-    }
-# when fromPlatform is
-#     Init ->
-#         Ok {sessions: []}
+update_model : Model, List (List U8) -> Result Model _
+update_model = \model, event_list ->
+    event_list
+    |> List.walkTry model \acc_model, encoded_event ->
+        when Decode.fromBytes encoded_event Json.utf8 is
+            Ok typer ->
+                when typer.type is
+                    "new_user" ->
+                        userEvent = Decode.fromBytes encoded_event Json.utf8
 
-#     Existing encoded ->
-#         decoder = Json.utf8With { fieldNameMapping: PascalCase }
+                        userEvent
+                        |> Result.map \u ->
+                            { model & users: List.append model.users u.user }
+                        |> Result.mapErr \_ -> InvalidCreateUserEvent
 
-#         decoded : Decode.DecodeResult Model
-#         decoded = Decode.fromBytesPartial encoded decoder
-#         decoded.result
-#         |> Result.mapErr \_ -> "Error: Can not decode database."
+                    _ ->
+                        # Unknown event. There is no way to log this :(
+                        acc_model |> Ok
 
-encodeModel : Model -> List U8
-encodeModel = \_model ->
-    # Encode.toBytes model Json.utf8
-    []
+            Err _ -> Err EventWithoutType
 
-handleReadRequest : Request, Model -> Response
-handleReadRequest = \req, model ->
+handle_request! : Request, Model => Result Response _
+handle_request! = \req, model ->
+
+    # TODO
+    # logRequest! req # Log the date, time, method, and url to stdout
+
     session = parseSession req model.sessions
 
     urlSegments =
@@ -72,13 +72,41 @@ handleReadRequest = \req, model ->
     when (req.method, urlSegments) is
         (Get, [""]) -> Views.Home.page { session } |> htmlResponse
         (Get, ["robots.txt"]) -> staticReponse robotsTxt
-        (Get, ["styles.css"]) -> staticReponse stylesFile
+        (Get, ["styles.css"]) -> staticContentTypeReponse stylesFile "text/css"
         (Get, ["site.js"]) -> staticReponse siteFile
-        (Get, ["bootsrap.bundle-5-3-2.min.js"]) -> staticReponse bootstrapJSFile
-        (Get, ["bootstrap-5-3-2.min.css"]) -> staticReponse bootsrapCSSFile
-        (Get, ["htmx-1-9-9.min.js"]) -> staticReponse htmxJSFile
+        (Get, ["bootstrap.bundle.min.js"]) -> staticReponse bootstrapJSFile
+        (Get, ["bootstrap.min.css"]) -> staticContentTypeReponse bootsrapCSSFile "text/css"
+        (Get, ["htmx.min.js"]) -> staticReponse htmxJSFile
         (Get, ["register"]) ->
             Views.Register.page { user: Fresh, email: Valid } |> htmlResponse
+
+        (Post save_event!, ["register"]) ->
+            params = parseFormUrlEncoded req.body |> Result.withDefault (Dict.empty {})
+            usernameResult = Dict.get params "user"
+            emailResult = Dict.get params "email"
+            when (usernameResult, emailResult) is
+                (Ok username, Ok email) ->
+                    when List.findFirst model.users (\u -> u.name == username) is
+                        Ok _user -> Views.Register.page { user: UserAlreadyExists username, email: Valid } |> htmlResponse
+                        Err _ ->
+                            newUser = {
+                                id: List.len model.users |> Num.toI64,
+                                email: email,
+                                name: username,
+                            }
+
+                            Encode.toBytes
+                                {
+                                    type: "new_user",
+                                    user: newUser,
+                                }
+                                Json.utf8
+                            |> save_event!
+
+                            redirect "/login"
+
+                _ ->
+                    Views.Register.page { user: UserNotProvided, email: NotProvided } |> htmlResponse
 
         (Get, ["login"]) ->
             Views.Login.page { session, user: Fresh } |> htmlResponse
@@ -98,186 +126,200 @@ handleReadRequest = \req, model ->
 
         _ -> handleErr (URLNotFound req.url)
 
-handleWriteRequest : Request, Model -> (Response, Model)
-handleWriteRequest = \req, model ->
-    session = parseSession req model.sessions
+# handleWriteRequest : Request, Model -> (Response, Model)
+# handleWriteRequest = \req, model ->
+#    session = parseSession req model.sessions
 
-    urlSegments =
-        req.url
-        |> Url.fromStr
-        |> Url.path
-        |> Str.splitOn "/"
-        |> List.dropFirst 1
+#    urlSegments =
+#        req.url
+#        |> Url.fromStr
+#        |> Url.path
+#        |> Str.splitOn "/"
+#        |> List.dropFirst 1
 
-    when (req.method, urlSegments) is
-        (Post, ["register"]) ->
-            params = parseFormUrlEncoded req.body |> Result.withDefault (Dict.empty {})
-            usernameResult = Dict.get params "user"
-            emailResult = Dict.get params "email"
-            when (usernameResult, emailResult) is
-                (Ok username, Ok email) ->
-                    when List.findFirst model.users (\u -> u.name == username) is
-                        Ok _user -> Views.Register.page { user: UserAlreadyExists username, email: Valid } |> htmlResponse |> \resp -> (resp, model)
-                        Err _ ->
-                            newUser = {
-                                id: List.len model.users |> Num.toI64,
-                                email: email,
-                                name: username,
-                            }
-                            newModel = { model & users: List.append model.users newUser }
-                            (redirect "/login", newModel)
+#    when (req.method, urlSegments) is
+#        (Post, ["register"]) ->
+#            params = parseFormUrlEncoded req.body |> Result.withDefault (Dict.empty {})
+#            usernameResult = Dict.get params "user"
+#            emailResult = Dict.get params "email"
+#            when (usernameResult, emailResult) is
+#                (Ok username, Ok email) ->
+#                    when List.findFirst model.users (\u -> u.name == username) is
+#                        Ok _user -> Views.Register.page { user: UserAlreadyExists username, email: Valid } |> htmlResponse |> \resp -> (resp, model)
+#                        Err _ ->
+#                            newUser = {
+#                                id: List.len model.users |> Num.toI64,
+#                                email: email,
+#                                name: username,
+#                            }
+#                            newModel = { model & users: List.append model.users newUser }
+#                            (redirect "/login", newModel)
 
-                _ ->
-                    Views.Register.page { user: UserNotProvided, email: NotProvided } |> htmlResponse |> \resp -> (resp, model)
+#                _ ->
+#                    Views.Register.page { user: UserNotProvided, email: NotProvided } |> htmlResponse |> \resp -> (resp, model)
 
-        (Post, ["login"]) ->
-            params = parseFormUrlEncoded req.body |> Result.withDefault (Dict.empty {})
+#        (Post, ["login"]) ->
+#            params = parseFormUrlEncoded req.body |> Result.withDefault (Dict.empty {})
 
-            when Dict.get params "user" is
-                Err _ -> Views.Login.page { session, user: UserNotProvided } |> htmlResponse |> \resp -> (resp, model)
-                Ok username ->
-                    when List.findFirst model.users (\u -> u.name == username) is
-                        Ok _user ->
-                            sessionID = List.len model.sessions |> Num.toI64
-                            newmodel = { model & sessions: List.append model.sessions { id: sessionID, user: LoggedIn username } }
-                            (
-                                {
-                                    status: 303,
-                                    headers: [
-                                        { name: "Set-Cookie", value: Str.toUtf8 "$(cookieName)=$(Num.toStr sessionID)" },
-                                        { name: "Location", value: Str.toUtf8 "/" },
-                                    ],
-                                    body: [],
-                                },
-                                newmodel,
-                            )
+#            when Dict.get params "user" is
+#                Err _ -> Views.Login.page { session, user: UserNotProvided } |> htmlResponse |> \resp -> (resp, model)
+#                Ok username ->
+#                    when List.findFirst model.users (\u -> u.name == username) is
+#                        Ok _user ->
+#                            sessionID = List.len model.sessions |> Num.toI64
+#                            newmodel = { model & sessions: List.append model.sessions { id: sessionID, user: LoggedIn username } }
+#                            (
+#                                {
+#                                    status: 303,
+#                                    headers: [
+#                                        { name: "Set-Cookie", value: Str.toUtf8 "$(cookieName)=$(Num.toStr sessionID)" },
+#                                        { name: "Location", value: Str.toUtf8 "/" },
+#                                    ],
+#                                    body: [],
+#                                },
+#                                newmodel,
+#                            )
 
-                        Err NotFound -> Views.Login.page { session, user: UserNotFound username } |> htmlResponse |> \resp -> (resp, model)
+#                        Err NotFound -> Views.Login.page { session, user: UserNotFound username } |> htmlResponse |> \resp -> (resp, model)
 
-        (Post, ["logout"]) ->
-            newmodel = { model & sessions: List.update model.sessions (session.id |> Num.toU64) (\s -> { s & user: Guest }) }
+#        (Post, ["logout"]) ->
+#            newmodel = { model & sessions: List.update model.sessions (session.id |> Num.toU64) (\s -> { s & user: Guest }) }
 
-            (
-                {
-                    status: 303,
-                    headers: [
-                        { name: "Set-Cookie", value: Str.toUtf8 "$(cookieName)=deleted;  path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT" },
-                        { name: "Location", value: Str.toUtf8 "/" },
-                    ],
-                    body: [],
-                },
-                newmodel,
-            )
+#            (
+#                {
+#                    status: 303,
+#                    headers: [
+#                        { name: "Set-Cookie", value: Str.toUtf8 "$(cookieName)=deleted;  path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT" },
+#                        { name: "Location", value: Str.toUtf8 "/" },
+#                    ],
+#                    body: [],
+#                },
+#                newmodel,
+#            )
 
-        (Post, ["task", taskIdStr, "delete"]) ->
-            newModel =
-                when Str.toI64 taskIdStr |> Result.try \id -> findIndex model.todos id is
-                    Ok index ->
-                        { model & todos: List.dropAt model.todos index }
+#        (Post, ["task", taskIdStr, "delete"]) ->
+#            newModel =
+#                when Str.toI64 taskIdStr |> Result.try \id -> findIndex model.todos id is
+#                    Ok index ->
+#                        { model & todos: List.dropAt model.todos index }
 
-                    Err _ -> model
+#                    Err _ -> model
 
-            (Views.Todo.listTodoView { todos: newModel.todos, filterQuery: "" } |> htmlResponse, newModel)
+#            (Views.Todo.listTodoView { todos: newModel.todos, filterQuery: "" } |> htmlResponse, newModel)
 
-        (Post, ["task", "search"]) ->
-            params = parseFormUrlEncoded req.body |> Result.withDefault (Dict.empty {})
-            filterQuery = Dict.get params "filterTasks" |> Result.withDefault ""
-            todos = model.todos |> List.keepIf \todo -> Str.contains todo.task filterQuery
-            (Views.Todo.listTodoView { todos, filterQuery } |> htmlResponse, model)
+#        (Post, ["task", "search"]) ->
+#            params = parseFormUrlEncoded req.body |> Result.withDefault (Dict.empty {})
+#            filterQuery = Dict.get params "filterTasks" |> Result.withDefault ""
+#            todos = model.todos |> List.keepIf \todo -> Str.contains todo.task filterQuery
+#            (Views.Todo.listTodoView { todos, filterQuery } |> htmlResponse, model)
 
-        (Post, ["task", "new"]) ->
-            when parseTodo req.body is
-                Ok newTodo ->
-                    nextID = (List.map model.todos \todo -> todo.id) |> List.max |> Result.withDefault 0 |> Num.add 1
-                    newModel = { model & todos: List.append model.todos { newTodo & id: nextID } }
-                    (redirect "/task", newModel)
+#        (Post, ["task", "new"]) ->
+#            when parseTodo req.body is
+#                Ok newTodo ->
+#                    nextID = (List.map model.todos \todo -> todo.id) |> List.max |> Result.withDefault 0 |> Num.add 1
+#                    newModel = { model & todos: List.append model.todos { newTodo & id: nextID } }
+#                    (redirect "/task", newModel)
 
-                Err err -> (handleErr err, model)
+#                Err err -> (handleErr err, model)
 
-        (Put, ["task", taskIdStr, "complete"]) ->
-            newModel =
-                when Str.toI64 taskIdStr |> Result.try \id -> findIndex model.todos id is
-                    Ok id ->
-                        { model & todos: List.update model.todos id \old -> { old & status: "Completed" } }
+#        (Put, ["task", taskIdStr, "complete"]) ->
+#            newModel =
+#                when Str.toI64 taskIdStr |> Result.try \id -> findIndex model.todos id is
+#                    Ok id ->
+#                        { model & todos: List.update model.todos id \old -> { old & status: "Completed" } }
 
-                    Err _ -> model
-            (triggerResponse "todosUpdated", newModel)
+#                    Err _ -> model
+#            (triggerResponse "todosUpdated", newModel)
 
-        (Put, ["task", taskIdStr, "in-progress"]) ->
-            newModel =
-                when Str.toI64 taskIdStr |> Result.try \id -> findIndex model.todos id is
-                    Ok id ->
-                        { model & todos: List.update model.todos id \old -> { old & status: "In-Progress" } }
+#        (Put, ["task", taskIdStr, "in-progress"]) ->
+#            newModel =
+#                when Str.toI64 taskIdStr |> Result.try \id -> findIndex model.todos id is
+#                    Ok id ->
+#                        { model & todos: List.update model.todos id \old -> { old & status: "In-Progress" } }
 
-                    Err _ -> model
-            (triggerResponse "todosUpdated", newModel)
+#                    Err _ -> model
+#            (triggerResponse "todosUpdated", newModel)
 
-        _ -> (handleErr (URLNotFound req.url), model)
+#        _ -> (handleErr (URLNotFound req.url), model)
 
 findIndex = \list, id ->
     List.findFirstIndex list (\e -> e.id == id)
 
-parseTodo : List U8 -> Result Todo [UnableToParseBodyTask _]_
-parseTodo = \bytes ->
-    dict = parseFormUrlEncoded bytes |> Result.withDefault (Dict.empty {})
+# parseTodo : List U8 -> Result Todo [UnableToParseBodyTask _]_
+# parseTodo = \bytes ->
+#    dict = parseFormUrlEncoded bytes |> Result.withDefault (Dict.empty {})
 
-    task <-
-        Dict.get dict "task"
-        |> Result.mapErr \_ -> UnableToParseBodyTask bytes
-        |> Result.try
+#    task <-
+#        Dict.get dict "task"
+#        |> Result.mapErr \_ -> UnableToParseBodyTask bytes
+#        |> Result.try
 
-    status <-
-        Dict.get dict "status"
-        |> Result.mapErr \_ -> UnableToParseBodyTask bytes
-        |> Result.try
+#    status <-
+#        Dict.get dict "status"
+#        |> Result.mapErr \_ -> UnableToParseBodyTask bytes
+#        |> Result.try
 
-    Ok { id: 0, task, status }
+#    Ok { id: 0, task, status }
 
-triggerResponse : Str -> Response
-triggerResponse = \trigger -> {
-    status: 200,
-    headers: [
-        { name: "HX-Trigger", value: Str.toUtf8 trigger },
-    ],
-    body: [],
-}
+triggerResponse : Str -> Result Response _
+triggerResponse = \trigger ->
+    Ok {
+        status: 200,
+        headers: [
+            { name: "HX-Trigger", value: trigger },
+        ],
+        body: [],
+    }
 
-staticReponse : List U8 -> Response
-staticReponse = \bytes -> {
-    status: 200,
-    headers: [
-        { name: "Cache-Control", value: Str.toUtf8 "max-age=120" },
-    ],
-    body: bytes,
-}
+staticReponse : List U8 -> Result Response _
+staticReponse = \bytes ->
+    Ok {
+        status: 200,
+        headers: [
+            { name: "Cache-Control", value: "max-age=120" },
+        ],
+        body: bytes,
+    }
 
-htmlResponse : Html.Node -> Response
-htmlResponse = \node -> {
-    status: 200,
-    headers: [
-        { name: "Content-Type", value: Str.toUtf8 "text/html; charset=utf-8" },
-    ],
-    body: Str.toUtf8 (Html.render node),
-}
+staticContentTypeReponse = \bytes, content_type ->
+    Ok {
+        status: 200,
+        headers: [
+            { name: "Cache-Control", value: "max-age=120" },
+            { name: "Content-Type", value: content_type },
+        ],
+        body: bytes,
+    }
 
-redirect : Str -> Response
-redirect = \next -> {
-    status: 303,
-    headers: [
-        { name: "Location", value: Str.toUtf8 next },
-    ],
-    body: [],
-}
+htmlResponse : Html.Node -> Result Response _
+htmlResponse = \node ->
+    Ok {
+        status: 200,
+        headers: [
+            { name: "Content-Type", value: "text/html; charset=utf-8" },
+        ],
+        body: Str.toUtf8 (Html.render node),
+    }
 
-handleErr : _ -> Response
+redirect : Str -> Result Response _
+redirect = \next ->
+    Ok {
+        status: 303,
+        headers: [
+            { name: "Location", value: next },
+        ],
+        body: [],
+    }
+
+handleErr : _ -> Result Response _
 handleErr = \err ->
 
     code =
         when err is
-            URLNotFound url -> 404
+            URLNotFound _url -> 404
             _ -> 500
 
-    {
+    Ok {
         status: code,
         headers: [],
         body: [],
@@ -306,27 +348,24 @@ parseSession = \req, sessions ->
         |> Result.mapErr \_ -> CookieHeaderNotFound
         |> Result.try \reqHeader ->
             reqHeader.value
-            |> Str.fromUtf8
-            |> Result.try \str ->
-                str
-                |> Str.splitOn ";"
-                |> List.findFirst \v -> v |> Str.trim |> Str.startsWith "$(cookieName)="
-                |> Result.mapErr \_ -> CookieNameNotFound cookieName str
-                |> Result.try \w ->
-                    w
-                    |> Str.splitOn "="
-                    |> List.get 1
-                    |> Result.mapErr \_ -> NoEqualFound
-                    |> Result.try \v ->
-                        v
-                        |> Str.toU64
-                        |> Result.mapErr \_ -> ValueNoInt v
+            |> Str.splitOn ";"
+            |> List.findFirst \v -> v |> Str.trim |> Str.startsWith "$(cookieName)="
+            |> Result.mapErr \_ -> CookieNameNotFound cookieName reqHeader.value
+            |> Result.try \w ->
+                w
+                |> Str.splitOn "="
+                |> List.get 1
+                |> Result.mapErr \_ -> NoEqualFound
+                |> Result.try \v ->
+                    v
+                    |> Str.toU64
+                    |> Result.mapErr \_ -> ValueNoInt v
 
     when mayID is
         Ok id -> List.get sessions id |> Result.withDefault anonymousSession
         Err _ -> anonymousSession
 
-# From basic-webserver
+# From basic-webserver 0.10
 parseFormUrlEncoded : List U8 -> Result (Dict Str Str) [BadUtf8]
 parseFormUrlEncoded = \bytes ->
 
@@ -342,17 +381,19 @@ parseFormUrlEncoded = \bytes ->
             [] if List.isEmpty chomped -> dict |> Ok
             [] ->
                 # chomped last value
-                keyStr <- key |> chainUtf8
-                valueStr <- chomped |> chainUtf8
-
-                Dict.insert dict keyStr valueStr |> Ok
+                key
+                |> chainUtf8 \keyStr ->
+                    chomped
+                    |> chainUtf8 \valueStr ->
+                        Dict.insert dict keyStr valueStr |> Ok
 
             ['=', ..] -> parse tail ParsingValue chomped [] dict # put chomped into key
             ['&', ..] ->
-                keyStr <- key |> chainUtf8
-                valueStr <- chomped |> chainUtf8
-
-                parse tail ParsingKey [] [] (Dict.insert dict keyStr valueStr)
+                key
+                |> chainUtf8 \keyStr ->
+                    chomped
+                    |> chainUtf8 \valueStr ->
+                        parse tail ParsingKey [] [] (Dict.insert dict keyStr valueStr)
 
             ['%', secondByte, thirdByte, ..] ->
                 hex = Num.toU8 (hexBytesToU32 [secondByte, thirdByte])

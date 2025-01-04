@@ -3,8 +3,7 @@ kingfisher
 sql_snippets.sql
 
 *.db
-db.requests
-db.snapshot
+db.events
 
 .DS_Store
 
