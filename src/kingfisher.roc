@@ -43,17 +43,25 @@ update_model = \old_model, event_list ->
                     "new_user" ->
                         encoded_event
                         |> Decode.fromBytes Json.utf8
-
-                        |> Result.map \u ->
+                        |> Result.mapErr? \_ -> InvalidCreateUserEvent
+                        |> \u ->
                             { model & users: List.append model.users u.user }
-                        |> Result.mapErr \_ -> InvalidCreateUserEvent
+                        |> Ok
 
                     "login" ->
                         encoded_event
                         |> Decode.fromBytes Json.utf8
-                        |> Result.map \{ session } ->
+                        |> Result.mapErr? \_ -> InvalidLoginEvent
+                        |> \{ session } ->
                             { model & sessions: List.append model.sessions { id: session.id, user: LoggedIn session.user } }
-                        |> Result.mapErr \_ -> InvalidLoginEvent
+                        |> Ok
+
+                    "logout" ->
+                        encoded_event
+                        |> Decode.fromBytes Json.utf8
+                        |> Result.mapErr? \_ -> InvalidLogoutEvent
+                        |> \{ session_id } -> { model & sessions: model.sessions |> List.dropIf \e -> e.id == session_id }
+                        |> Ok
 
                     _ ->
                         # Unknown event. There is no way to log this :(
@@ -147,6 +155,24 @@ handle_request! = \req, model ->
 
                         Err NotFound -> Views.Login.page { session, user: UserNotFound username } |> htmlResponse
 
+        (Post save_event!, ["logout"]) ->
+            Encode.toBytes
+                {
+                    type: "logout",
+                    session_id: session.id,
+                }
+                Json.utf8
+            |> save_event!
+
+            Ok {
+                status: 303,
+                headers: [
+                    { name: "Set-Cookie", value: "$(cookieName)=deleted;  path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT" },
+                    { name: "Location", value: "/" },
+                ],
+                body: [],
+            }
+
         (Get, ["task", "new"]) -> redirect "/task"
         (Get, ["task", "list"]) ->
             Views.Todo.listTodoView { todos: model.todos, filterQuery: "" } |> htmlResponse
@@ -174,21 +200,6 @@ handle_request! = \req, model ->
 #        |> List.dropFirst 1
 
 #    when (req.method, urlSegments) is
-
-#        (Post, ["logout"]) ->
-#            newmodel = { model & sessions: List.update model.sessions (session.id |> Num.toU64) (\s -> { s & user: Guest }) }
-
-#            (
-#                {
-#                    status: 303,
-#                    headers: [
-#                        { name: "Set-Cookie", value: Str.toUtf8 "$(cookieName)=deleted;  path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT" },
-#                        { name: "Location", value: Str.toUtf8 "/" },
-#                    ],
-#                    body: [],
-#                },
-#                newmodel,
-#            )
 
 #        (Post, ["task", taskIdStr, "delete"]) ->
 #            newModel =
