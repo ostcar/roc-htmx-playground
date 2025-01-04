@@ -92,6 +92,16 @@ updateModel = \eventList, initOrModel ->
                                 |> Result.mapErr \_ -> Foo "invalid session id in event"
                             |> Result.mapErr \ err ->
                                 "can not decode event"
+                        
+                        "task-delete" ->
+                            event : Result {index: U64} _
+                            event = Decode.fromBytes encodedEvent Json.utf8
+
+                            event
+                            |> Result.map \e ->
+                                { model & todos: List.dropAt model.todos e.index }
+                            |> Result.mapErr \ err ->
+                                "can not decode event"
 
                         _ ->
                             Err "Unknown event $(typer.type)"
@@ -115,6 +125,7 @@ respond = \req, model ->
             # _ -> respondCodeLogError (Str.joinWith ["SERVER ERROR" |> Color.fg Red, Inspect.toStr err] " ") 500
             _ -> crash (Inspect.toStr err)
 
+handleReq : Request, Model -> Task Response _
 handleReq = \req, model ->
     # TODO logRequest
 
@@ -217,18 +228,28 @@ handleReq = \req, model ->
             }
 
         (Get, ["task", "new"]) -> Helpers.respondRedirect "/task"
+
         (Post saveEvent, ["task", idStr, "delete"]) ->
-            newModel =
-                when Str.toI64 idStr |> Result.try \id -> findIndex model.todos id is
-                    Ok index ->
-                        { model & todos: List.dropAt model.todos index }
+            when Str.toI64 idStr |> Result.try \id -> findIndex model.todos id is
+                Ok index ->
+                    event = Encode.toBytes
+                        {
+                            type: "task-delete",
+                            index: index,
+                        }
+                        Json.utf8
+        
+                    saveEvent event
+                        |> Task.mapErr! \err -> ServeErr err
 
-                    Err _ -> model
+                    when updateModel [event] (Existing model) is
+                        Err _ -> Task.err (ServeErr "can not update model after update")
+                        Ok newModel -> Views.Todo.listTodoView { todos: newModel.todos, filterQuery: "" } |> respondHtml []
 
-            # TODO Add event to delete task
-            # Maybe a redirect afterwards is easier?
+                Err _ -> 
+                    Views.Todo.listTodoView { todos: model.todos, filterQuery: "" } |> respondHtml []
 
-            Views.Todo.listTodoView { todos: newModel.todos, filterQuery: "" } |> respondHtml []
+            
 
         (Post _, ["task", "search"]) ->
             params = parseFormUrlEncoded req.body |> Result.withDefault (Dict.empty {})
