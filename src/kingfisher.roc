@@ -34,23 +34,30 @@ init_model = {
 }
 
 update_model : Model, List (List U8) -> Result Model _
-update_model = \model, event_list ->
+update_model = \old_model, event_list ->
     event_list
-    |> List.walkTry model \acc_model, encoded_event ->
+    |> List.walkTry old_model \model, encoded_event ->
         when Decode.fromBytes encoded_event Json.utf8 is
             Ok typer ->
                 when typer.type is
                     "new_user" ->
-                        userEvent = Decode.fromBytes encoded_event Json.utf8
+                        encoded_event
+                        |> Decode.fromBytes Json.utf8
 
-                        userEvent
                         |> Result.map \u ->
                             { model & users: List.append model.users u.user }
                         |> Result.mapErr \_ -> InvalidCreateUserEvent
 
+                    "login" ->
+                        encoded_event
+                        |> Decode.fromBytes Json.utf8
+                        |> Result.map \{ session } ->
+                            { model & sessions: List.append model.sessions { id: session.id, user: LoggedIn session.user } }
+                        |> Result.mapErr \_ -> InvalidLoginEvent
+
                     _ ->
                         # Unknown event. There is no way to log this :(
-                        acc_model |> Ok
+                        model |> Ok
 
             Err _ -> Err EventWithoutType
 
@@ -111,6 +118,35 @@ handle_request! = \req, model ->
         (Get, ["login"]) ->
             Views.Login.page { session, user: Fresh } |> htmlResponse
 
+        (Post save_event!, ["login"]) ->
+            params = parseFormUrlEncoded req.body |> Result.withDefault (Dict.empty {})
+
+            when Dict.get params "user" is
+                Err _ -> Views.Login.page { session, user: UserNotProvided } |> htmlResponse
+                Ok username ->
+                    when List.findFirst model.users (\u -> u.name == username) is
+                        Ok _user ->
+                            sessionID = List.len model.sessions |> Num.toI64
+
+                            Encode.toBytes
+                                {
+                                    type: "login",
+                                    session: { id: sessionID, user: username },
+                                }
+                                Json.utf8
+                            |> save_event!
+
+                            Ok {
+                                status: 303,
+                                headers: [
+                                    { name: "Set-Cookie", value: "$(cookieName)=$(Num.toStr sessionID)" },
+                                    { name: "Location", value: "/" },
+                                ],
+                                body: [],
+                            }
+
+                        Err NotFound -> Views.Login.page { session, user: UserNotFound username } |> htmlResponse
+
         (Get, ["task", "new"]) -> redirect "/task"
         (Get, ["task", "list"]) ->
             Views.Todo.listTodoView { todos: model.todos, filterQuery: "" } |> htmlResponse
@@ -138,49 +174,6 @@ handle_request! = \req, model ->
 #        |> List.dropFirst 1
 
 #    when (req.method, urlSegments) is
-#        (Post, ["register"]) ->
-#            params = parseFormUrlEncoded req.body |> Result.withDefault (Dict.empty {})
-#            usernameResult = Dict.get params "user"
-#            emailResult = Dict.get params "email"
-#            when (usernameResult, emailResult) is
-#                (Ok username, Ok email) ->
-#                    when List.findFirst model.users (\u -> u.name == username) is
-#                        Ok _user -> Views.Register.page { user: UserAlreadyExists username, email: Valid } |> htmlResponse |> \resp -> (resp, model)
-#                        Err _ ->
-#                            newUser = {
-#                                id: List.len model.users |> Num.toI64,
-#                                email: email,
-#                                name: username,
-#                            }
-#                            newModel = { model & users: List.append model.users newUser }
-#                            (redirect "/login", newModel)
-
-#                _ ->
-#                    Views.Register.page { user: UserNotProvided, email: NotProvided } |> htmlResponse |> \resp -> (resp, model)
-
-#        (Post, ["login"]) ->
-#            params = parseFormUrlEncoded req.body |> Result.withDefault (Dict.empty {})
-
-#            when Dict.get params "user" is
-#                Err _ -> Views.Login.page { session, user: UserNotProvided } |> htmlResponse |> \resp -> (resp, model)
-#                Ok username ->
-#                    when List.findFirst model.users (\u -> u.name == username) is
-#                        Ok _user ->
-#                            sessionID = List.len model.sessions |> Num.toI64
-#                            newmodel = { model & sessions: List.append model.sessions { id: sessionID, user: LoggedIn username } }
-#                            (
-#                                {
-#                                    status: 303,
-#                                    headers: [
-#                                        { name: "Set-Cookie", value: Str.toUtf8 "$(cookieName)=$(Num.toStr sessionID)" },
-#                                        { name: "Location", value: Str.toUtf8 "/" },
-#                                    ],
-#                                    body: [],
-#                                },
-#                                newmodel,
-#                            )
-
-#                        Err NotFound -> Views.Login.page { session, user: UserNotFound username } |> htmlResponse |> \resp -> (resp, model)
 
 #        (Post, ["logout"]) ->
 #            newmodel = { model & sessions: List.update model.sessions (session.id |> Num.toU64) (\s -> { s & user: Guest }) }
