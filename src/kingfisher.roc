@@ -5,6 +5,8 @@ app [init_model, update_model, handle_request!, Model] {
 }
 
 import webserver.Http exposing [Request, Response]
+import webserver.Utc
+import webserver.Stdout
 import html.Html
 import Models.Session exposing [Session, User]
 import Models.Todo exposing [Todo]
@@ -63,6 +65,20 @@ update_model = \old_model, event_list ->
                         |> \{ session_id } -> { model & sessions: model.sessions |> List.dropIf \e -> e.id == session_id }
                         |> Ok
 
+                    "task_delete" ->
+                        encoded_event
+                        |> Decode.fromBytes Json.utf8
+                        |> Result.mapErr? \_ -> InvalidTaskDeleteEvent
+                        |> \{ task_id } -> { model & todos: model.todos |> List.dropIf \e -> e.id == task_id }
+                        |> Ok
+
+                    "task_create" ->
+                        encoded_event
+                        |> Decode.fromBytes Json.utf8
+                        |> Result.mapErr? \_ -> InvalidTaskCreateEvent
+                        |> \{ task } -> { model & todos: List.append model.todos task }
+                        |> Ok
+
                     _ ->
                         # Unknown event. There is no way to log this :(
                         model |> Ok
@@ -71,9 +87,7 @@ update_model = \old_model, event_list ->
 
 handle_request! : Request, Model => Result Response _
 handle_request! = \req, model ->
-
-    # TODO
-    # logRequest! req # Log the date, time, method, and url to stdout
+    logRequest! req # Log the date, time, method, and url to stdout
 
     session = parseSession req model.sessions
 
@@ -174,6 +188,41 @@ handle_request! = \req, model ->
             }
 
         (Get, ["task", "new"]) -> redirect "/task"
+        (Post save_event!, ["task", taskIdStr, "delete"]) ->
+            event =
+                Encode.toBytes
+                    {
+                        type: "task_delete",
+                        task_id: taskIdStr |> Str.toI64?,
+                    }
+                    Json.utf8
+
+            save_event! event
+            new_model = update_model? model [event]
+            Views.Todo.listTodoView { todos: new_model.todos, filterQuery: "" } |> htmlResponse
+
+        (Post _, ["task", "search"]) ->
+            params = parseFormUrlEncoded req.body |> Result.withDefault (Dict.empty {})
+            filterQuery = Dict.get params "filterTasks" |> Result.withDefault ""
+            todos = model.todos |> List.keepIf \todo -> Str.contains todo.task filterQuery
+            Views.Todo.listTodoView { todos, filterQuery } |> htmlResponse
+
+        (Post save_event!, ["task", "new"]) ->
+            when parseTodo req.body is
+                Ok newTodo ->
+                    nextID = (List.map model.todos \todo -> todo.id) |> List.max |> Result.withDefault 0 |> Num.add 1
+                    Encode.toBytes
+                        {
+                            type: "task_create",
+                            task: { newTodo & id: nextID },
+                        }
+                        Json.utf8
+                    |> save_event!
+
+                    redirect "/task"
+
+                Err err -> handleErr err
+
         (Get, ["task", "list"]) ->
             Views.Todo.listTodoView { todos: model.todos, filterQuery: "" } |> htmlResponse
 
@@ -190,41 +239,8 @@ handle_request! = \req, model ->
 
 # handleWriteRequest : Request, Model -> (Response, Model)
 # handleWriteRequest = \req, model ->
-#    session = parseSession req model.sessions
-
-#    urlSegments =
-#        req.url
-#        |> Url.fromStr
-#        |> Url.path
-#        |> Str.splitOn "/"
-#        |> List.dropFirst 1
 
 #    when (req.method, urlSegments) is
-
-#        (Post, ["task", taskIdStr, "delete"]) ->
-#            newModel =
-#                when Str.toI64 taskIdStr |> Result.try \id -> findIndex model.todos id is
-#                    Ok index ->
-#                        { model & todos: List.dropAt model.todos index }
-
-#                    Err _ -> model
-
-#            (Views.Todo.listTodoView { todos: newModel.todos, filterQuery: "" } |> htmlResponse, newModel)
-
-#        (Post, ["task", "search"]) ->
-#            params = parseFormUrlEncoded req.body |> Result.withDefault (Dict.empty {})
-#            filterQuery = Dict.get params "filterTasks" |> Result.withDefault ""
-#            todos = model.todos |> List.keepIf \todo -> Str.contains todo.task filterQuery
-#            (Views.Todo.listTodoView { todos, filterQuery } |> htmlResponse, model)
-
-#        (Post, ["task", "new"]) ->
-#            when parseTodo req.body is
-#                Ok newTodo ->
-#                    nextID = (List.map model.todos \todo -> todo.id) |> List.max |> Result.withDefault 0 |> Num.add 1
-#                    newModel = { model & todos: List.append model.todos { newTodo & id: nextID } }
-#                    (redirect "/task", newModel)
-
-#                Err err -> (handleErr err, model)
 
 #        (Put, ["task", taskIdStr, "complete"]) ->
 #            newModel =
@@ -246,34 +262,32 @@ handle_request! = \req, model ->
 
 #        _ -> (handleErr (URLNotFound req.url), model)
 
-findIndex = \list, id ->
-    List.findFirstIndex list (\e -> e.id == id)
+# findIndex = \list, id ->
+#    List.findFirstIndex list (\e -> e.id == id)
 
-# parseTodo : List U8 -> Result Todo [UnableToParseBodyTask _]_
-# parseTodo = \bytes ->
-#    dict = parseFormUrlEncoded bytes |> Result.withDefault (Dict.empty {})
+parseTodo : List U8 -> Result Todo [UnableToParseBodyTask _]_
+parseTodo = \bytes ->
+    dict = parseFormUrlEncoded bytes |> Result.withDefault (Dict.empty {})
 
-#    task <-
-#        Dict.get dict "task"
-#        |> Result.mapErr \_ -> UnableToParseBodyTask bytes
-#        |> Result.try
+    task =
+        Dict.get dict "task"
+        |> Result.mapErr? \_ -> UnableToParseBodyTask bytes
 
-#    status <-
-#        Dict.get dict "status"
-#        |> Result.mapErr \_ -> UnableToParseBodyTask bytes
-#        |> Result.try
+    status =
+        Dict.get dict "status"
+        |> Result.mapErr? \_ -> UnableToParseBodyTask bytes
 
-#    Ok { id: 0, task, status }
+    Ok { id: 0, task, status }
 
-triggerResponse : Str -> Result Response _
-triggerResponse = \trigger ->
-    Ok {
-        status: 200,
-        headers: [
-            { name: "HX-Trigger", value: trigger },
-        ],
-        body: [],
-    }
+# triggerResponse : Str -> Result Response _
+# triggerResponse = \trigger ->
+#    Ok {
+#        status: 200,
+#        headers: [
+#            { name: "HX-Trigger", value: trigger },
+#        ],
+#        body: [],
+#    }
 
 staticReponse : List U8 -> Result Response _
 staticReponse = \bytes ->
@@ -343,6 +357,14 @@ anonymousSession = {
 }
 
 cookieName = "sessionId"
+
+logRequest! : Request => {}
+logRequest! = \req ->
+    date = Utc.now! {} |> Utc.to_iso_8601
+    method = Http.method_to_str req.method
+    url = req.url
+    body = req.body |> Str.fromUtf8 |> Result.withDefault "<invalid utf8 body>"
+    Stdout.line! "$(date) $(method) $(url) $(body)"
 
 parseSession : Request, List Session -> Session
 parseSession = \req, sessions ->
